@@ -4,6 +4,10 @@ from html import unescape
 from workers import fetch
 
 
+# ============================================================
+# COMPANIES
+# ============================================================
+
 COMPANIES = {
     "Stripe": "stripe",
     "Coinbase": "coinbase",
@@ -12,7 +16,11 @@ COMPANIES = {
 }
 
 
-INDIA_LOCATIONS = [
+# ============================================================
+# INDIA LOCATIONS
+# ============================================================
+
+INDIA_LOCATIONS = {
     "india",
     "new delhi",
     "delhi",
@@ -32,10 +40,10 @@ INDIA_LOCATIONS = [
     "kochi",
     "indore",
     "lucknow",
-]
+}
 
 
-INDIA_REMOTE_PHRASES = [
+INDIA_REMOTE_PHRASES = {
     "remote india",
     "remote - india",
     "remote, india",
@@ -47,8 +55,12 @@ INDIA_REMOTE_PHRASES = [
     "anywhere in india",
     "pan india",
     "pan-india",
-]
+}
 
+
+# ============================================================
+# ROLE KEYWORDS
+# ============================================================
 
 ROLE_KEYWORDS = {
     "AML": [
@@ -160,6 +172,10 @@ ROLE_KEYWORDS = {
 }
 
 
+# ============================================================
+# PROFILE SKILLS
+# ============================================================
+
 PROFILE_SKILLS = [
     "aml",
     "kyc",
@@ -194,6 +210,10 @@ PROFILE_SKILLS = [
     "trust and safety",
 ]
 
+
+# ============================================================
+# EXCLUDED TITLES
+# ============================================================
 
 EXCLUDED_TITLE_KEYWORDS = [
     "sales",
@@ -232,6 +252,10 @@ EXCLUDED_TITLE_KEYWORDS = [
 ]
 
 
+# ============================================================
+# EXPERIENCE KEYWORDS
+# ============================================================
+
 EXPERIENCE_KEYWORDS = [
     "investigation",
     "case investigation",
@@ -255,10 +279,37 @@ EXPERIENCE_KEYWORDS = [
 ]
 
 
+# ============================================================
+# LIMITS
+# ============================================================
+
+# Maximum number of promising jobs for which we download
+# the full description.
+MAX_DETAIL_JOBS_PER_COMPANY = 30
+
+# Maximum final results returned to Worker.
+MAX_FINAL_RESULTS = 20
+
+
+# ============================================================
+# HELPERS
+# ============================================================
+
 def clean_html(text):
-    text = re.sub(r"<[^>]+>", " ", text or "")
+    text = re.sub(
+        r"<[^>]+>",
+        " ",
+        text or "",
+    )
+
     text = unescape(text)
-    text = re.sub(r"\s+", " ", text)
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text,
+    )
+
     return text.strip()
 
 
@@ -271,10 +322,18 @@ def normalize(text):
 
 
 def get_location(job):
-    location = job.get("location", {})
+    location = job.get(
+        "location",
+        {},
+    )
 
     if isinstance(location, dict):
-        return str(location.get("name", ""))
+        return str(
+            location.get(
+                "name",
+                "",
+            )
+        )
 
     return str(location)
 
@@ -297,82 +356,72 @@ def classify_location(location):
 
 
 def location_score(location_type):
-    if location_type == "INDIA":
-        return 15
-
     if location_type == "INDIA_REMOTE":
         return 20
+
+    if location_type == "INDIA":
+        return 15
 
     return 0
 
 
-async def fetch_greenhouse_jobs(
-    company_name,
-    board_token,
-):
-    url = (
-        "https://boards-api.greenhouse.io/v1/boards/"
-        + board_token
-        + "/jobs?content=true"
-    )
+def title_is_excluded(title_lower):
+    for keyword in EXCLUDED_TITLE_KEYWORDS:
+        if keyword in title_lower:
+            return True
 
-    try:
-        response = await fetch(
-            url,
-            method="GET",
-            headers={
-                "Accept": "application/json",
-                "User-Agent": "AML-Job-Hunter/1.0",
-            },
-        )
-
-        if response.status != 200:
-            print(
-                "Skipped:",
-                company_name,
-                "| HTTP",
-                response.status,
-            )
-            return []
-
-        data = await response.json()
-
-        jobs = data.get("jobs", [])
-
-        print(
-            "Jobs found:",
-            len(jobs),
-        )
-
-        for job in jobs:
-            job["_company"] = company_name
-
-        return jobs
-
-    except Exception as error:
-        print(
-            "Error:",
-            company_name,
-            "|",
-            str(error),
-        )
-        return []
+    return False
 
 
-def find_roles(title, description):
+def find_roles(title, description=""):
+    title_lower = normalize(title)
+    description_lower = normalize(description)
+
     matched_roles = []
 
-    combined = (
-        normalize(title)
-        + " "
-        + normalize(description)
-    )
+    # Title gets priority.
+    for role, keywords in ROLE_KEYWORDS.items():
+
+        for keyword in keywords:
+
+            if keyword in title_lower:
+
+                if role not in matched_roles:
+                    matched_roles.append(role)
+
+                break
+
+    # If title has no direct role match, allow description match
+    # only for stronger broad categories.
+    if not matched_roles and description_lower:
+
+        for role, keywords in ROLE_KEYWORDS.items():
+
+            for keyword in keywords:
+
+                if keyword in description_lower:
+
+                    if role not in matched_roles:
+                        matched_roles.append(role)
+
+                    break
+
+    return matched_roles
+
+
+def title_role_candidates(title):
+    title_lower = normalize(title)
+
+    if title_is_excluded(title_lower):
+        return []
+
+    matched_roles = []
 
     for role, keywords in ROLE_KEYWORDS.items():
 
         for keyword in keywords:
 
-            if keyword in combined:
+            if keyword in title_lower:
 
                 if role not in matched_roles:
                     matched_roles.append(role)
@@ -393,117 +442,423 @@ def calculate_score(
 
     score = 0
 
+    # --------------------------------------------------------
     # Location
-    score += location_score(location_type)
+    # --------------------------------------------------------
 
+    score += location_score(
+        location_type
+    )
+
+    # --------------------------------------------------------
     # Role relevance
+    # --------------------------------------------------------
+
     if matched_roles:
         score += min(
             len(matched_roles) * 20,
             40,
         )
 
+    # --------------------------------------------------------
     # Strong title relevance
+    # --------------------------------------------------------
+
+    title_role_hits = 0
+
     for role, keywords in ROLE_KEYWORDS.items():
 
         for keyword in keywords:
 
             if keyword in title_lower:
-                score += 15
+                title_role_hits += 1
                 break
 
+    score += min(
+        title_role_hits * 10,
+        30,
+    )
+
+    # --------------------------------------------------------
     # Profile skills
+    # --------------------------------------------------------
+
     skill_matches = []
 
     for skill in PROFILE_SKILLS:
 
         if skill in title_lower:
+
             score += 4
 
             if skill not in skill_matches:
                 skill_matches.append(skill)
 
         elif skill in description_lower:
+
             score += 2
 
             if skill not in skill_matches:
                 skill_matches.append(skill)
 
-    score = min(score, 100)
+    score = min(
+        score,
+        100,
+    )
 
     return score, skill_matches
 
 
-async def scan_jobs():
+def find_experience_matches(description):
+    description_lower = normalize(
+        description
+    )
 
-    all_jobs = []
+    matches = []
+
+    for keyword in EXPERIENCE_KEYWORDS:
+
+        if keyword in description_lower:
+
+            if keyword not in matches:
+                matches.append(keyword)
+
+    return matches
+
+
+# ============================================================
+# GREENHOUSE JOB LIST
+# ============================================================
+
+async def fetch_greenhouse_job_list(
+    company_name,
+    board_token,
+):
+    """
+    Fetch lightweight job listing.
+
+    IMPORTANT:
+    We intentionally do NOT use content=true here.
+    This prevents downloading thousands of large descriptions
+    during the first stage of the scan.
+    """
+
+    url = (
+        "https://boards-api.greenhouse.io/v1/boards/"
+        + board_token
+        + "/jobs"
+    )
+
+    try:
+
+        response = await fetch(
+            url,
+            method="GET",
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "AML-Job-Hunter/1.0",
+            },
+        )
+
+        if response.status != 200:
+
+            print(
+                "Skipped:",
+                company_name,
+                "| HTTP",
+                response.status,
+            )
+
+            return []
+
+        data = await response.json()
+
+        jobs = data.get(
+            "jobs",
+            [],
+        )
+
+        for job in jobs:
+            job["_company"] = company_name
+
+        print(
+            "Jobs listed:",
+            company_name,
+            len(jobs),
+        )
+
+        return jobs
+
+    except Exception as error:
+
+        print(
+            "List error:",
+            company_name,
+            "|",
+            repr(error),
+        )
+
+        return []
+
+
+# ============================================================
+# INDIVIDUAL JOB DETAILS
+# ============================================================
+
+async def fetch_job_details(
+    company_name,
+    board_token,
+    job_id,
+):
+    """
+    Fetch full description only after the job has passed
+    the lightweight title/location filter.
+    """
+
+    url = (
+        "https://boards-api.greenhouse.io/v1/boards/"
+        + board_token
+        + "/jobs/"
+        + str(job_id)
+        + "?content=true"
+    )
+
+    try:
+
+        response = await fetch(
+            url,
+            method="GET",
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "AML-Job-Hunter/1.0",
+            },
+        )
+
+        if response.status != 200:
+
+            print(
+                "Detail skipped:",
+                company_name,
+                job_id,
+                "| HTTP",
+                response.status,
+            )
+
+            return None
+
+        job = await response.json()
+
+        job["_company"] = company_name
+
+        return job
+
+    except Exception as error:
+
+        print(
+            "Detail error:",
+            company_name,
+            job_id,
+            "|",
+            repr(error),
+        )
+
+        return None
+
+
+# ============================================================
+# SCAN
+# ============================================================
+
+async def scan_jobs():
 
     print()
     print("========================================")
     print("       AML / KYC CLOUD JOB HUNTER")
     print("========================================")
 
+    all_candidates = []
+
+    # ========================================================
+    # STAGE 1
+    # Lightweight company scan
+    # ========================================================
+
     for company_name, board_token in COMPANIES.items():
 
         print()
-        print("Scanning:", company_name)
+        print(
+            "Scanning:",
+            company_name,
+        )
 
-        jobs = await fetch_greenhouse_jobs(
+        jobs = await fetch_greenhouse_job_list(
             company_name,
             board_token,
         )
 
-        all_jobs.extend(jobs)
+        for job in jobs:
+
+            title = job.get(
+                "title",
+                "",
+            )
+
+            location = get_location(
+                job
+            )
+
+            title_lower = normalize(
+                title
+            )
+
+            location_type = classify_location(
+                location
+            )
+
+            if location_type not in (
+                "INDIA",
+                "INDIA_REMOTE",
+            ):
+                continue
+
+            if title_is_excluded(
+                title_lower
+            ):
+                continue
+
+            matched_roles = title_role_candidates(
+                title
+            )
+
+            if not matched_roles:
+                continue
+
+            all_candidates.append(
+                {
+                    "job": job,
+                    "company_name": company_name,
+                    "board_token": board_token,
+                    "matched_roles": matched_roles,
+                }
+            )
 
     print()
     print("========================================")
-    print("             FILTERING")
+    print("       LIGHTWEIGHT FILTER RESULTS")
     print("========================================")
 
     print(
-        "Total jobs collected:",
-        len(all_jobs),
+        "India role candidates:",
+        len(all_candidates),
     )
 
-    location_candidates = 0
-    role_candidates = 0
+    if not all_candidates:
+        print(
+            "No India AML/KYC candidates found."
+        )
+
+        return []
+
+    # ========================================================
+    # Sort candidates before expensive detail requests
+    # ========================================================
+
+    all_candidates.sort(
+        key=lambda item: (
+            len(
+                item["matched_roles"]
+            ),
+            item["job"].get(
+                "title",
+                "",
+            ),
+        ),
+        reverse=True,
+    )
+
+    # Limit expensive detail requests globally.
+    detail_candidates = all_candidates[
+        :MAX_DETAIL_JOBS_PER_COMPANY * len(COMPANIES)
+    ]
+
+    print(
+        "Detailed jobs selected:",
+        len(detail_candidates),
+    )
+
+    # ========================================================
+    # STAGE 2
+    # Fetch descriptions only for shortlisted jobs
+    # ========================================================
 
     matched_jobs = []
 
-    for job in all_jobs:
+    detail_count = 0
 
-        title = job.get("title", "")
-        content = job.get("content", "")
-        location = get_location(job)
+    for candidate in detail_candidates:
 
-        description = clean_html(content)
+        job = candidate["job"]
 
-        title_lower = normalize(title)
+        company_name = candidate[
+            "company_name"
+        ]
 
-        # Exclude clearly irrelevant titles
-        excluded = False
+        board_token = candidate[
+            "board_token"
+        ]
 
-        for keyword in EXCLUDED_TITLE_KEYWORDS:
+        job_id = job.get(
+            "id"
+        )
 
-            if keyword in title_lower:
-                excluded = True
-                break
-
-        if excluded:
+        if job_id is None:
             continue
 
-        # Location
-        location_type = classify_location(location)
+        detail_count += 1
 
-        if location_type not in [
+        print(
+            "Fetching details:",
+            company_name,
+            job_id,
+        )
+
+        detailed_job = await fetch_job_details(
+            company_name,
+            board_token,
+            job_id,
+        )
+
+        if not detailed_job:
+            continue
+
+        title = detailed_job.get(
+            "title",
+            "",
+        )
+
+        content = detailed_job.get(
+            "content",
+            "",
+        )
+
+        location = get_location(
+            detailed_job
+        )
+
+        description = clean_html(
+            content
+        )
+
+        location_type = classify_location(
+            location
+        )
+
+        if location_type not in (
             "INDIA",
             "INDIA_REMOTE",
-        ]:
+        ):
             continue
 
-        location_candidates += 1
-
-        # Role matching
         matched_roles = find_roles(
             title,
             description,
@@ -512,9 +867,6 @@ async def scan_jobs():
         if not matched_roles:
             continue
 
-        role_candidates += 1
-
-        # Score
         score, matched_skills = calculate_score(
             title,
             description,
@@ -522,28 +874,16 @@ async def scan_jobs():
             matched_roles,
         )
 
-        # Only useful matches
         if score < 50:
             continue
 
-        experience_matches = []
-
-        description_lower = normalize(
+        experience_matches = find_experience_matches(
             description
         )
 
-        for keyword in EXPERIENCE_KEYWORDS:
-
-            if keyword in description_lower:
-
-                if keyword not in experience_matches:
-                    experience_matches.append(
-                        keyword
-                    )
-
         matched_jobs.append(
             {
-                "job": job,
+                "job": detailed_job,
                 "score": score,
                 "matched_roles": matched_roles,
                 "matched_skills": matched_skills,
@@ -552,10 +892,25 @@ async def scan_jobs():
             }
         )
 
+    # ========================================================
+    # FINAL SORT
+    # ========================================================
+
     matched_jobs.sort(
-        key=lambda x: x["score"],
+        key=lambda item: item.get(
+            "score",
+            0,
+        ),
         reverse=True,
     )
+
+    matched_jobs = matched_jobs[
+        :MAX_FINAL_RESULTS
+    ]
+
+    # ========================================================
+    # RESULTS
+    # ========================================================
 
     print()
     print("========================================")
@@ -563,18 +918,13 @@ async def scan_jobs():
     print("========================================")
 
     print(
-        "Total jobs scanned:",
-        len(all_jobs),
+        "India role candidates:",
+        len(all_candidates),
     )
 
     print(
-        "India location candidates:",
-        location_candidates,
-    )
-
-    print(
-        "Role candidates:",
-        role_candidates,
+        "Detailed jobs fetched:",
+        detail_count,
     )
 
     print(
@@ -587,7 +937,9 @@ async def scan_jobs():
         start=1,
     ):
 
-        job = result["job"]
+        job = result[
+            "job"
+        ]
 
         print()
         print("----------------------------------------")
@@ -599,52 +951,73 @@ async def scan_jobs():
 
         print(
             "Company:",
-            job.get("_company"),
+            job.get(
+                "_company"
+            ),
         )
 
         print(
             "Job Title:",
-            job.get("title"),
+            job.get(
+                "title"
+            ),
         )
 
         print(
             "Location:",
-            get_location(job),
+            get_location(
+                job
+            ),
         )
 
         print(
             "Match Score:",
-            str(result["score"]) + "/100",
+            str(
+                result["score"]
+            )
+            + "/100",
         )
 
         print(
             "Matched Roles:",
             ", ".join(
-                result["matched_roles"]
+                result[
+                    "matched_roles"
+                ]
             ),
         )
 
         print(
             "Profile Skills:",
             ", ".join(
-                result["matched_skills"]
+                result[
+                    "matched_skills"
+                ]
             )
-            if result["matched_skills"]
+            if result[
+                "matched_skills"
+            ]
             else "None",
         )
 
         print(
             "Experience:",
             ", ".join(
-                result["experience_matches"]
+                result[
+                    "experience_matches"
+                ]
             )
-            if result["experience_matches"]
+            if result[
+                "experience_matches"
+            ]
             else "None",
         )
 
         print(
             "URL:",
-            job.get("absolute_url"),
+            job.get(
+                "absolute_url"
+            ),
         )
 
     print()
