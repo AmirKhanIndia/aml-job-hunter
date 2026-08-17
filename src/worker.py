@@ -1,5 +1,6 @@
 from urllib.parse import urlparse
 import json
+import traceback
 
 from workers import WorkerEntrypoint, Response, fetch
 
@@ -11,28 +12,120 @@ class Default(WorkerEntrypoint):
     async def fetch(self, request):
         url = urlparse(request.url)
 
-        if url.path == "/telegram-test":
-            return await self.telegram_test()
+        # --------------------------------------------------
+        # BASIC HEALTH CHECK
+        # --------------------------------------------------
 
-        if url.path == "/scan":
+        if url.path == "/":
+            return Response(
+                "AML Job Hunter is online!"
+            )
+
+        # --------------------------------------------------
+        # TELEGRAM TEST
+        # --------------------------------------------------
+
+        if url.path == "/telegram-test":
             try:
-                results = await scan_jobs()
+                return await self.telegram_test()
+
+            except Exception as error:
+                print(
+                    "TELEGRAM TEST ERROR:",
+                    repr(error),
+                )
+
+                print(
+                    traceback.format_exc()
+                )
 
                 return Response(
-                    f"Scan completed. India eligible jobs: {len(results)}"
+                    "Telegram test exception: "
+                    + repr(error),
+                    status=500,
+                )
+
+        # --------------------------------------------------
+        # MANUAL SCAN
+        # --------------------------------------------------
+
+        if url.path == "/scan":
+
+            try:
+                print(
+                    "========================================"
+                )
+
+                print(
+                    "MANUAL SCAN REQUEST RECEIVED"
+                )
+
+                print(
+                    "========================================"
+                )
+
+                results = await scan_jobs()
+
+                print(
+                    "SCAN SUCCESS"
+                )
+
+                print(
+                    "Eligible jobs:",
+                    len(results),
+                )
+
+                return Response(
+                    "Scan completed. India eligible jobs: "
+                    + str(len(results))
                 )
 
             except Exception as error:
-                print("SCAN ERROR:", str(error))
+
+                error_message = repr(error)
+
+                error_trace = traceback.format_exc()
+
+                print(
+                    "========================================"
+                )
+
+                print(
+                    "SCAN ERROR"
+                )
+
+                print(
+                    "Exception:",
+                    error_message,
+                )
+
+                print(
+                    error_trace
+                )
+
+                print(
+                    "========================================"
+                )
 
                 return Response(
-                    f"Scan failed: {str(error)}",
+                    "SCAN EXCEPTION\n\n"
+                    + error_message
+                    + "\n\nTRACEBACK:\n"
+                    + error_trace,
                     status=500,
                 )
+
+        # --------------------------------------------------
+        # UNKNOWN ROUTE
+        # --------------------------------------------------
 
         return Response(
             "AML Job Hunter is online!"
         )
+
+    # ======================================================
+    # TELEGRAM TEST
+    # ======================================================
 
     async def telegram_test(self):
 
@@ -44,6 +137,10 @@ class Default(WorkerEntrypoint):
                 status=500,
             )
 
+        # --------------------------------------------------
+        # GET TELEGRAM UPDATES
+        # --------------------------------------------------
+
         updates_url = (
             f"https://api.telegram.org/bot{token}/getUpdates"
         )
@@ -54,6 +151,7 @@ class Default(WorkerEntrypoint):
         )
 
         if updates_response.status != 200:
+
             error_text = await updates_response.text()
 
             print(
@@ -62,43 +160,64 @@ class Default(WorkerEntrypoint):
             )
 
             return Response(
-                "Telegram getUpdates failed",
+                "Telegram getUpdates failed\n\n"
+                + error_text,
                 status=500,
             )
 
         data = await updates_response.json()
 
-        updates = data.get("result", [])
+        updates = data.get(
+            "result",
+            [],
+        )
 
         if not updates:
+
             return Response(
-                "No Telegram message found. Open the bot and send /start first."
+                "No Telegram message found. "
+                "Open the bot and send /start first."
             )
+
+        # --------------------------------------------------
+        # FIND CHAT ID
+        # --------------------------------------------------
 
         chat_id = None
 
         for update in reversed(updates):
 
-            message = update.get("message")
+            message = update.get(
+                "message"
+            )
 
             if not message:
                 continue
 
-            chat = message.get("chat")
+            chat = message.get(
+                "chat"
+            )
 
             if not chat:
                 continue
 
-            chat_id = chat.get("id")
+            chat_id = chat.get(
+                "id"
+            )
 
             if chat_id is not None:
                 break
 
         if chat_id is None:
+
             return Response(
                 "Could not find Telegram chat ID.",
                 status=500,
             )
+
+        # --------------------------------------------------
+        # SEND TEST MESSAGE
+        # --------------------------------------------------
 
         send_url = (
             f"https://api.telegram.org/bot{token}/sendMessage"
@@ -107,8 +226,8 @@ class Default(WorkerEntrypoint):
         payload = {
             "chat_id": chat_id,
             "text": (
-                "🚀 AML Job Hunter connected!\n\n"
-                "Cloudflare Worker → Telegram is working.\n\n"
+                "AML Job Hunter connected!\n\n"
+                "Cloudflare Worker -> Telegram is working.\n\n"
                 "Next step: automatic job alerts."
             ),
         }
@@ -132,13 +251,18 @@ class Default(WorkerEntrypoint):
             )
 
             return Response(
-                "Telegram sendMessage failed",
+                "Telegram sendMessage failed\n\n"
+                + error_text,
                 status=500,
             )
 
         return Response(
             "Telegram test message sent successfully!"
         )
+
+    # ======================================================
+    # CRON
+    # ======================================================
 
     async def scheduled(
         self,
@@ -155,20 +279,40 @@ class Default(WorkerEntrypoint):
             "AML JOB HUNTER CRON STARTED"
         )
 
+        print(
+            "========================================"
+        )
+
         try:
 
             results = await scan_jobs()
 
             print(
-                "Cron scan completed. Eligible jobs:",
+                "Cron scan completed."
+            )
+
+            print(
+                "Eligible jobs:",
                 len(results),
             )
 
         except Exception as error:
 
             print(
+                "========================================"
+            )
+
+            print(
                 "CRON ERROR:",
-                str(error),
+                repr(error),
+            )
+
+            print(
+                traceback.format_exc()
+            )
+
+            print(
+                "========================================"
             )
 
         print(
