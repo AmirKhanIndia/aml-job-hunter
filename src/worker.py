@@ -74,7 +74,6 @@ class Default(WorkerEntrypoint):
                 )
 
             except Exception as error:
-
                 print(
                     "SCAN ERROR:",
                     repr(error),
@@ -97,7 +96,7 @@ class Default(WorkerEntrypoint):
         )
 
     # ======================================================
-    # TELEGRAM
+    # TELEGRAM TEST
     # ======================================================
 
     async def telegram_test(self):
@@ -137,7 +136,6 @@ class Default(WorkerEntrypoint):
         )
 
         if not updates:
-
             return Response(
                 "No Telegram message found. "
                 "Open the bot and send /start first."
@@ -148,7 +146,6 @@ class Default(WorkerEntrypoint):
         )
 
         if chat_id is None:
-
             return Response(
                 "Could not find Telegram chat ID.",
                 status=500,
@@ -165,7 +162,6 @@ class Default(WorkerEntrypoint):
         )
 
         if not success:
-
             return Response(
                 "Telegram sendMessage failed",
                 status=500,
@@ -322,7 +318,7 @@ class Default(WorkerEntrypoint):
         )
 
         message = (
-            "🚨 AML JOB MATCH\n\n"
+            "AML JOB MATCH\n\n"
             f"Company: {company}\n"
             f"Role: {title}\n"
             f"Location: {location}\n\n"
@@ -338,7 +334,7 @@ class Default(WorkerEntrypoint):
         return message
 
     # ======================================================
-    # JOB ID
+    # UNIQUE JOB ID
     # ======================================================
 
     def get_job_id(self, result):
@@ -358,7 +354,11 @@ class Default(WorkerEntrypoint):
         )
 
         if job_id is not None:
-            return str(job_id)
+            return (
+                str(job.get("_company", ""))
+                + ":"
+                + str(job_id)
+            )
 
         company = job.get(
             "_company",
@@ -377,41 +377,54 @@ class Default(WorkerEntrypoint):
         )
 
     # ======================================================
-    # DUPLICATE CHECK
+    # KV DUPLICATE CHECK
     # ======================================================
 
-    def get_sent_jobs(self):
+    async def job_was_seen(self, job_id):
+
+        key = "job:" + job_id
 
         try:
-
-            stored = self.env.SENT_JOBS
-
-            if not stored:
-                return set()
-
-            data = json.loads(
-                stored
+            value = await self.env.SEEN_JOBS.get(
+                key
             )
 
-            if not isinstance(
-                data,
-                list,
-            ):
-                return set()
-
-            return set(data)
+            return value is not None
 
         except Exception as error:
 
             print(
-                "SENT_JOBS read error:",
+                "KV GET ERROR:",
                 repr(error),
             )
 
-            return set()
+            raise
 
     # ======================================================
-    # JOB ALERTS
+    # MARK JOB AS SEEN
+    # ======================================================
+
+    async def mark_job_seen(self, job_id):
+
+        key = "job:" + job_id
+
+        try:
+            await self.env.SEEN_JOBS.put(
+                key,
+                "seen",
+            )
+
+        except Exception as error:
+
+            print(
+                "KV PUT ERROR:",
+                repr(error),
+            )
+
+            raise
+
+    # ======================================================
+    # SEND JOB ALERTS
     # ======================================================
 
     async def send_job_alerts(
@@ -452,7 +465,6 @@ class Default(WorkerEntrypoint):
         )
 
         if not updates:
-
             raise Exception(
                 "No Telegram chat found. "
                 "Send /start to the bot first."
@@ -463,19 +475,13 @@ class Default(WorkerEntrypoint):
         )
 
         if chat_id is None:
-
             raise Exception(
                 "Could not find Telegram chat ID."
             )
 
-        sent_jobs = self.get_sent_jobs()
-
         sent = 0
         duplicates = 0
 
-        new_job_ids = []
-
-        # Highest scoring jobs first
         sorted_results = sorted(
             results,
             key=lambda item: item.get(
@@ -491,9 +497,20 @@ class Default(WorkerEntrypoint):
                 result
             )
 
-            if job_id in sent_jobs:
+            # Check persistent KV
+            already_seen = await self.job_was_seen(
+                job_id
+            )
+
+            if already_seen:
 
                 duplicates += 1
+
+                print(
+                    "Duplicate skipped:",
+                    job_id,
+                )
+
                 continue
 
             if sent >= MAX_TELEGRAM_ALERTS_PER_SCAN:
@@ -509,17 +526,20 @@ class Default(WorkerEntrypoint):
                 message,
             )
 
-            if success:
+            if not success:
+                continue
 
-                sent += 1
+            # Only mark as seen AFTER Telegram succeeds
+            await self.mark_job_seen(
+                job_id
+            )
 
-                sent_jobs.add(
-                    job_id
-                )
+            sent += 1
 
-                new_job_ids.append(
-                    job_id
-                )
+            print(
+                "Telegram alert sent:",
+                job_id,
+            )
 
         print(
             "Telegram alerts sent:",
@@ -534,7 +554,6 @@ class Default(WorkerEntrypoint):
         return {
             "sent": sent,
             "duplicates": duplicates,
-            "new_jobs": new_job_ids,
         }
 
     # ======================================================
