@@ -1,0 +1,13 @@
+{
+  "name": "aml-job-hunter",
+  "main": "worker.py",
+  "compatibility_date": "2026-08-17",
+  "compatibility_flags": [
+    "python_workers"
+  ],
+  "triggers": {
+    "crons": [
+      "0 3 * * *"
+    ]
+  }
+}
