@@ -5,11 +5,8 @@ description = "AI-powered AML KYC job hunter"
 requires-python = ">=3.13"
 dependencies = []
 
-[tool.setuptools]
-py-modules = ["worker"]
-
 [dependency-groups]
 dev = [
-    "workers-py>=1.90",
+    "workers-py",
     "workers-runtime-sdk"
 ]
