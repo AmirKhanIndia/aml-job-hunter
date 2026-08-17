@@ -7,23 +7,18 @@ from workers import WorkerEntrypoint, Response, fetch
 from scanner import scan_jobs
 
 
+MAX_TELEGRAM_ALERTS_PER_SCAN = 10
+
+
 class Default(WorkerEntrypoint):
 
     async def fetch(self, request):
         url = urlparse(request.url)
 
-        # --------------------------------------------------
-        # BASIC HEALTH CHECK
-        # --------------------------------------------------
-
         if url.path == "/":
             return Response(
                 "AML Job Hunter is online!"
             )
-
-        # --------------------------------------------------
-        # TELEGRAM TEST
-        # --------------------------------------------------
 
         if url.path == "/telegram-test":
             try:
@@ -45,86 +40,64 @@ class Default(WorkerEntrypoint):
                     status=500,
                 )
 
-        # --------------------------------------------------
-        # MANUAL SCAN
-        # --------------------------------------------------
-
         if url.path == "/scan":
-
             try:
                 print(
                     "========================================"
                 )
 
                 print(
-                    "MANUAL SCAN REQUEST RECEIVED"
-                )
-
-                print(
-                    "========================================"
+                    "MANUAL SCAN STARTED"
                 )
 
                 results = await scan_jobs()
-
-                print(
-                    "SCAN SUCCESS"
-                )
 
                 print(
                     "Eligible jobs:",
                     len(results),
                 )
 
+                telegram_result = await self.send_job_alerts(
+                    results
+                )
+
                 return Response(
-                    "Scan completed. India eligible jobs: "
+                    "Scan completed.\n"
+                    "India eligible jobs: "
                     + str(len(results))
+                    + "\n"
+                    "Telegram alerts sent: "
+                    + str(telegram_result["sent"])
+                    + "\n"
+                    "Skipped duplicates: "
+                    + str(telegram_result["duplicates"])
                 )
 
             except Exception as error:
 
-                error_message = repr(error)
-
-                error_trace = traceback.format_exc()
-
                 print(
-                    "========================================"
+                    "SCAN ERROR:",
+                    repr(error),
                 )
 
                 print(
-                    "SCAN ERROR"
-                )
-
-                print(
-                    "Exception:",
-                    error_message,
-                )
-
-                print(
-                    error_trace
-                )
-
-                print(
-                    "========================================"
+                    traceback.format_exc()
                 )
 
                 return Response(
                     "SCAN EXCEPTION\n\n"
-                    + error_message
+                    + repr(error)
                     + "\n\nTRACEBACK:\n"
-                    + error_trace,
+                    + traceback.format_exc(),
                     status=500,
                 )
-
-        # --------------------------------------------------
-        # UNKNOWN ROUTE
-        # --------------------------------------------------
 
         return Response(
             "AML Job Hunter is online!"
         )
 
     # ======================================================
-    # TELEGRAM TEST
+    # TELEGRAM
     # ======================================================
 
     async def telegram_test(self):
@@ -136,10 +109,6 @@ class Default(WorkerEntrypoint):
                 "TELEGRAM_BOT_TOKEN is missing",
                 status=500,
             )
-
-        # --------------------------------------------------
-        # GET TELEGRAM UPDATES
-        # --------------------------------------------------
 
         updates_url = (
             f"https://api.telegram.org/bot{token}/getUpdates"
@@ -153,11 +122,6 @@ class Default(WorkerEntrypoint):
         if updates_response.status != 200:
 
             error_text = await updates_response.text()
-
-            print(
-                "Telegram getUpdates error:",
-                error_text,
-            )
 
             return Response(
                 "Telegram getUpdates failed\n\n"
@@ -179,11 +143,43 @@ class Default(WorkerEntrypoint):
                 "Open the bot and send /start first."
             )
 
-        # --------------------------------------------------
-        # FIND CHAT ID
-        # --------------------------------------------------
+        chat_id = self.find_chat_id(
+            updates
+        )
 
-        chat_id = None
+        if chat_id is None:
+
+            return Response(
+                "Could not find Telegram chat ID.",
+                status=500,
+            )
+
+        success = await self.send_telegram_message(
+            token,
+            chat_id,
+            (
+                "AML Job Hunter connected!\n\n"
+                "Cloudflare Worker -> Telegram is working.\n\n"
+                "Automatic job alerts are ready."
+            ),
+        )
+
+        if not success:
+
+            return Response(
+                "Telegram sendMessage failed",
+                status=500,
+            )
+
+        return Response(
+            "Telegram test message sent successfully!"
+        )
+
+    # ======================================================
+    # FIND TELEGRAM CHAT
+    # ======================================================
+
+    def find_chat_id(self, updates):
 
         for update in reversed(updates):
 
@@ -206,18 +202,20 @@ class Default(WorkerEntrypoint):
             )
 
             if chat_id is not None:
-                break
+                return chat_id
 
-        if chat_id is None:
+        return None
 
-            return Response(
-                "Could not find Telegram chat ID.",
-                status=500,
-            )
+    # ======================================================
+    # SEND TELEGRAM MESSAGE
+    # ======================================================
 
-        # --------------------------------------------------
-        # SEND TEST MESSAGE
-        # --------------------------------------------------
+    async def send_telegram_message(
+        self,
+        token,
+        chat_id,
+        text,
+    ):
 
         send_url = (
             f"https://api.telegram.org/bot{token}/sendMessage"
@@ -225,14 +223,11 @@ class Default(WorkerEntrypoint):
 
         payload = {
             "chat_id": chat_id,
-            "text": (
-                "AML Job Hunter connected!\n\n"
-                "Cloudflare Worker -> Telegram is working.\n\n"
-                "Next step: automatic job alerts."
-            ),
+            "text": text,
+            "disable_web_page_preview": False,
         }
 
-        send_response = await fetch(
+        response = await fetch(
             send_url,
             method="POST",
             headers={
@@ -241,24 +236,306 @@ class Default(WorkerEntrypoint):
             body=json.dumps(payload),
         )
 
-        if send_response.status != 200:
+        if response.status != 200:
 
-            error_text = await send_response.text()
+            error_text = await response.text()
 
             print(
                 "Telegram sendMessage error:",
                 error_text,
             )
 
-            return Response(
-                "Telegram sendMessage failed\n\n"
-                + error_text,
-                status=500,
+            return False
+
+        return True
+
+    # ======================================================
+    # CREATE JOB MESSAGE
+    # ======================================================
+
+    def format_job_message(self, result):
+
+        job = result["job"]
+
+        company = job.get(
+            "_company",
+            "Unknown",
+        )
+
+        title = job.get(
+            "title",
+            "Unknown role",
+        )
+
+        location = job.get(
+            "location",
+            "",
+        )
+
+        if isinstance(location, dict):
+            location = location.get(
+                "name",
+                "",
             )
 
-        return Response(
-            "Telegram test message sent successfully!"
+        url = job.get(
+            "absolute_url",
+            "",
         )
+
+        score = result.get(
+            "score",
+            0,
+        )
+
+        roles = result.get(
+            "matched_roles",
+            [],
+        )
+
+        skills = result.get(
+            "matched_skills",
+            [],
+        )
+
+        experience = result.get(
+            "experience_matches",
+            [],
+        )
+
+        role_text = (
+            ", ".join(roles)
+            if roles
+            else "AML/KYC"
+        )
+
+        skills_text = (
+            ", ".join(skills[:8])
+            if skills
+            else "None"
+        )
+
+        experience_text = (
+            ", ".join(experience[:8])
+            if experience
+            else "None"
+        )
+
+        message = (
+            "🚨 AML JOB MATCH\n\n"
+            f"Company: {company}\n"
+            f"Role: {title}\n"
+            f"Location: {location}\n\n"
+            f"Match Score: {score}/100\n"
+            f"Category: {role_text}\n\n"
+            f"Matched Skills:\n"
+            f"{skills_text}\n\n"
+            f"Relevant Experience:\n"
+            f"{experience_text}\n\n"
+            f"Apply:\n{url}"
+        )
+
+        return message
+
+    # ======================================================
+    # JOB ID
+    # ======================================================
+
+    def get_job_id(self, result):
+
+        job = result["job"]
+
+        absolute_url = job.get(
+            "absolute_url",
+            "",
+        )
+
+        if absolute_url:
+            return absolute_url
+
+        job_id = job.get(
+            "id"
+        )
+
+        if job_id is not None:
+            return str(job_id)
+
+        company = job.get(
+            "_company",
+            "",
+        )
+
+        title = job.get(
+            "title",
+            "",
+        )
+
+        return (
+            company
+            + "|"
+            + title
+        )
+
+    # ======================================================
+    # DUPLICATE CHECK
+    # ======================================================
+
+    def get_sent_jobs(self):
+
+        try:
+
+            stored = self.env.SENT_JOBS
+
+            if not stored:
+                return set()
+
+            data = json.loads(
+                stored
+            )
+
+            if not isinstance(
+                data,
+                list,
+            ):
+                return set()
+
+            return set(data)
+
+        except Exception as error:
+
+            print(
+                "SENT_JOBS read error:",
+                repr(error),
+            )
+
+            return set()
+
+    # ======================================================
+    # JOB ALERTS
+    # ======================================================
+
+    async def send_job_alerts(
+        self,
+        results,
+    ):
+
+        token = self.env.TELEGRAM_BOT_TOKEN
+
+        if not token:
+            raise Exception(
+                "TELEGRAM_BOT_TOKEN is missing"
+            )
+
+        updates_url = (
+            f"https://api.telegram.org/bot{token}/getUpdates"
+        )
+
+        updates_response = await fetch(
+            updates_url,
+            method="GET",
+        )
+
+        if updates_response.status != 200:
+
+            error_text = await updates_response.text()
+
+            raise Exception(
+                "Telegram getUpdates failed: "
+                + error_text
+            )
+
+        data = await updates_response.json()
+
+        updates = data.get(
+            "result",
+            [],
+        )
+
+        if not updates:
+
+            raise Exception(
+                "No Telegram chat found. "
+                "Send /start to the bot first."
+            )
+
+        chat_id = self.find_chat_id(
+            updates
+        )
+
+        if chat_id is None:
+
+            raise Exception(
+                "Could not find Telegram chat ID."
+            )
+
+        sent_jobs = self.get_sent_jobs()
+
+        sent = 0
+        duplicates = 0
+
+        new_job_ids = []
+
+        # Highest scoring jobs first
+        sorted_results = sorted(
+            results,
+            key=lambda item: item.get(
+                "score",
+                0,
+            ),
+            reverse=True,
+        )
+
+        for result in sorted_results:
+
+            job_id = self.get_job_id(
+                result
+            )
+
+            if job_id in sent_jobs:
+
+                duplicates += 1
+                continue
+
+            if sent >= MAX_TELEGRAM_ALERTS_PER_SCAN:
+                break
+
+            message = self.format_job_message(
+                result
+            )
+
+            success = await self.send_telegram_message(
+                token,
+                chat_id,
+                message,
+            )
+
+            if success:
+
+                sent += 1
+
+                sent_jobs.add(
+                    job_id
+                )
+
+                new_job_ids.append(
+                    job_id
+                )
+
+        print(
+            "Telegram alerts sent:",
+            sent,
+        )
+
+        print(
+            "Duplicate jobs skipped:",
+            duplicates,
+        )
+
+        return {
+            "sent": sent,
+            "duplicates": duplicates,
+            "new_jobs": new_job_ids,
+        }
 
     # ======================================================
     # CRON
@@ -279,10 +556,6 @@ class Default(WorkerEntrypoint):
             "AML JOB HUNTER CRON STARTED"
         )
 
-        print(
-            "========================================"
-        )
-
         try:
 
             results = await scan_jobs()
@@ -294,6 +567,20 @@ class Default(WorkerEntrypoint):
             print(
                 "Eligible jobs:",
                 len(results),
+            )
+
+            telegram_result = await self.send_job_alerts(
+                results
+            )
+
+            print(
+                "Telegram alerts sent:",
+                telegram_result["sent"],
+            )
+
+            print(
+                "Duplicate jobs skipped:",
+                telegram_result["duplicates"],
             )
 
         except Exception as error:
